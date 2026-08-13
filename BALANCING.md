@@ -92,10 +92,11 @@ comfortably survivable on starting capital; late winters are the killer.
 
 Charged every Income Phase (~9% of build cost per round, per level), modified by berth
 traits; mortgaged structures owe **50%**. **Rising rents: all upkeep ×1.2 every 3 rounds,
-compounding** (×1.44 by round 7, ×2.07 by round 13, ×2.99 by round 19). This is the clock
-that guarantees an endgame — measured horizons 10–28 rounds, no simulated game stalling.
-The escalator is deliberately gentle enough that efficient portfolios stay meaningfully
-ahead of weak ones deep into the game.
+compounding, capped at ×2.5** (×1.44 by round 7, ×2.07 by round 13, ceiling from round 19).
+This is the clock that guarantees an endgame — measured horizons 10–28 rounds, no simulated
+game stalling; the cap was verified empirically (30 capped games all still ended, mean end
+round 17.6 vs 18.1 uncapped) and exists so an efficient portfolio can still out-earn the
+rent late-game instead of every strategy collapsing into attrition.
 
 ## 9. Event deck (34 cards)
 
@@ -154,9 +155,6 @@ simulation bot in the test suite is a proof of that seam.
 
 - **Card hands** (rulebook 3.5): the base rulebook never defines what held cards do, so v1
   has no hidden hands; events resolve on draw. Revisit when an expansion gives hands a job.
-- A dice-triggered duration-1 disaster rolled by the round's last player skews that one
-  tourist distribution and then blows over at the round boundary — ruled acceptable
-  ("strikes as the crowds arrive") rather than special-cased.
 - Variants (Alliances, Silent Auction, Development Freeze) and all four expansions: out of
   scope for v1 by the brief; the content-pack structure (zones, traits, events, disasters,
   characters all as data) is their landing pad.

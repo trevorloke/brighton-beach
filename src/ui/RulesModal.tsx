@@ -36,7 +36,7 @@ function buildSections(content: ContentPack): Section[] {
     },
     {
       title: 'Rising rents',
-      body: `As the resort grows, so do the ground rents: every ${r.rentEscalationEvery} rounds, all upkeep is multiplied by ×${r.rentEscalationMult} (compounding). The seafront gets richer — and crueller. Over-extended empires that looked unsinkable in round 4 drown in round 14. This is the clock that ends the game.`,
+      body: `As the resort grows, so do the ground rents: every ${r.rentEscalationEvery} rounds, all upkeep is multiplied by ×${r.rentEscalationMult} (compounding, to a ceiling of ×${r.rentEscalationCap}). The seafront gets richer — and crueller. Over-extended empires that looked unsinkable in round 4 drown in round 14, while a lean, efficient portfolio can still out-earn the rent. This is the clock that ends the game.`,
     },
     {
       title: 'Establishments',

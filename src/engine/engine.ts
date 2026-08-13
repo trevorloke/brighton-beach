@@ -585,7 +585,23 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
       }
       tourists = Math.max(0, tourists);
 
-      if (triggeredDisaster) next = triggerDisaster(content, next, triggeredDisaster, 'double ones on the tourist dice');
+      if (triggeredDisaster) {
+        next = triggerDisaster(content, next, triggeredDisaster, 'double ones on the tourist dice');
+        // If this roll ends the round, expireEffects will tick immediately —
+        // compensate so the disaster delivers its full duration of income
+        // phases no matter which seat rolled it.
+        const endsRound = activePlayerIdsFrom(next, next.currentPlayer)[0] <= next.currentPlayer;
+        if (endsRound) {
+          next = {
+            ...next,
+            activeEffects: next.activeEffects.map((e) =>
+              e.effect.type === 'disasterActive' && e.effect.disaster === triggeredDisaster
+                ? { ...e, remainingRounds: e.remainingRounds + 1 }
+                : e,
+            ),
+          };
+        }
+      }
 
       // Distribute after any dice-triggered disaster so the flow reflects it.
       const byZone = distributeTourists(content, next, tourists, preference);

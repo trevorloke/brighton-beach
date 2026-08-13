@@ -57,7 +57,7 @@ Design decisions that matter:
 
 ## Testing
 
-`npm test` runs 77 engine tests: income math, cluster multipliers, stacking curves, berth
+`npm test` runs 78 engine tests: income math, cluster multipliers, stacking curves, berth
 trait effects (costs, attraction, income, upkeep, granted resistances, stack caps), the
 season wheel, rising rents, every event-effect kind, all five disasters and their
 resistances, mortgage/sell/trade rules, the no-resale-profit invariant, bankruptcy edge

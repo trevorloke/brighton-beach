@@ -90,10 +90,13 @@ export function seasonForRound(content: ContentPack, round: number): SeasonDef {
   return seasons[(round - 1) % seasons.length];
 }
 
-/** Rising rents: upkeep multiplier for a round (compounds as the resort grows). */
+/** Rising rents: upkeep multiplier for a round (compounds as the resort grows, to a ceiling). */
 export function rentMultiplier(content: ContentPack, round: number): number {
-  const { rentEscalationEvery, rentEscalationMult } = content.rules;
-  return Math.pow(rentEscalationMult, Math.floor((round - 1) / rentEscalationEvery));
+  const { rentEscalationEvery, rentEscalationMult, rentEscalationCap } = content.rules;
+  return Math.min(
+    rentEscalationCap,
+    Math.pow(rentEscalationMult, Math.floor((round - 1) / rentEscalationEvery)),
+  );
 }
 
 /** Economy-card build cost multiplier currently in force. */

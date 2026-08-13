@@ -177,9 +177,11 @@ export interface RuleNumbers {
   mortgagedMaintenancePct: number; // upkeep fraction while mortgaged
   /** The season wheel, cycled by round number. */
   seasons: SeasonDef[];
-  /** Rising rents: upkeep × rentEscalationMult^floor((round-1)/rentEscalationEvery). */
+  /** Rising rents: upkeep × rentEscalationMult^floor((round-1)/rentEscalationEvery), capped. */
   rentEscalationEvery: number;
   rentEscalationMult: number;
+  /** Ceiling on the rent multiplier — efficient portfolios stay profitable late. */
+  rentEscalationCap: number;
 }
 
 /* ------------------------------------------------------------------ */

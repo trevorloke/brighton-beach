@@ -326,11 +326,14 @@ describe('seasons', () => {
 });
 
 describe('rising rents', () => {
-  it('escalates every three rounds', () => {
+  it('escalates every three rounds, up to the cap', () => {
     expect(rentMultiplier(content, 1)).toBe(1);
     expect(rentMultiplier(content, 3)).toBe(1);
     expect(rentMultiplier(content, 4)).toBeCloseTo(1.2, 5);
     expect(rentMultiplier(content, 7)).toBeCloseTo(1.44, 5);
+    // 1.2^6 ≈ 2.99 would apply from round 19 — the ×2.5 ceiling holds instead.
+    expect(rentMultiplier(content, 19)).toBe(2.5);
+    expect(rentMultiplier(content, 40)).toBe(2.5);
   });
 
   it('raises maintenance in the income report', () => {
@@ -497,13 +500,45 @@ describe('disasters', () => {
     expect(structureAttraction(content, state, findSlot(state, 'pier', PLAIN_PIER)!, clusterSizes(state))).toBeGreaterThan(0);
   });
 
+  it('a dice-triggered disaster on the round-closing roll still bites the next round', () => {
+    // Hunt a seed where the SECOND player's roll comes up double ones: their
+    // roll wraps the round, which used to expire a 1-round disaster before
+    // any income phase felt it.
+    for (let seed = 1; seed < 5000; seed++) {
+      let state = calmSeas(act(newGame(seed), { type: 'COLLECT_INCOME' }));
+      state = act(state, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
+      if (state.phase === 'game-over') continue;
+      state = calmSeas(state); // clear player 1's inherited effects, keep determinism
+      state = act(state, { type: 'COLLECT_INCOME' }, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
+      const dice = state.lastDice!;
+      if (!dice.triggeredDisaster) continue;
+      // Round wrapped; the freshly triggered disaster must still be active.
+      expect(state.round).toBe(2);
+      expect(
+        state.activeEffects.some(
+          (e) => e.effect.type === 'disasterActive' && e.effect.disaster === dice.triggeredDisaster,
+        ),
+      ).toBe(true);
+      return;
+    }
+    throw new Error('no double-ones seed found in range');
+  });
+
   it('disasters expire after their duration', () => {
-    let state = calmSeas(act(newGame(), { type: 'COLLECT_INCOME' }));
-    state = withDisaster(state, 'seagulls'); // duration 1
-    // Complete the round: P1 acts+rolls, P2 income/act/rolls -> new round.
-    state = act(state, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
-    state = act(state, { type: 'COLLECT_INCOME' }, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
-    expect(state.activeEffects.filter((e) => e.effect.type === 'disasterActive' && e.effect.disaster === 'seagulls')).toHaveLength(0);
+    // Find a seed whose two rolls trigger no dice disaster of their own, so
+    // only the injected seagulls are in play.
+    for (let seed = 1; seed < 200; seed++) {
+      let state = calmSeas(act(newGame(seed), { type: 'COLLECT_INCOME' }));
+      state = withDisaster(state, 'seagulls'); // duration 1
+      // Complete the round: P1 acts+rolls, P2 income/act/rolls -> new round.
+      state = act(state, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
+      if (state.phase === 'game-over' || state.lastDice?.triggeredDisaster) continue;
+      state = act(state, { type: 'COLLECT_INCOME' }, { type: 'END_ACTIONS' }, { type: 'ROLL_TOURISTS' });
+      if (state.lastDice?.triggeredDisaster) continue;
+      expect(state.activeEffects.filter((e) => e.effect.type === 'disasterActive' && e.effect.disaster === 'seagulls')).toHaveLength(0);
+      return;
+    }
+    throw new Error('no quiet seed found');
   });
 });
 

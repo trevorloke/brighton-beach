@@ -230,6 +230,7 @@ export const RULES: RuleNumbers = {
   ],
   rentEscalationEvery: 3,
   rentEscalationMult: 1.2,
+  rentEscalationCap: 2.5,
 };
 
 export const BASE_CONTENT: ContentPack = {
