@@ -5,7 +5,7 @@ import type { GameAction, GameConfig, GameState } from './engine/types';
 import { Lobby } from './ui/Lobby';
 import { Game } from './ui/Game';
 
-const SAVE_KEY = 'brighton-beach-save-v1';
+const SAVE_KEY = 'brighton-beach-save-v2';
 
 export interface Toast {
   id: number;

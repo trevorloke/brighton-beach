@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  ContentPack, EstablishmentDef, GameAction, GameState, Slot, TradeSide,
+  ContentPack, EstablishmentDef, GameAction, GameState, Slot, TradeSide, ZoneId,
 } from '../engine/types';
 import {
-  assetValue, buildCost, computeIncome, defById, slotKey, structureBaseValue,
+  assetValue, buildCost, computeIncome, defById, maxLevelsAt, rentMultiplier,
+  seasonForRound, sellPctFor, slotKey, structureBaseValue, traitsAt, zoneAttractions,
 } from '../engine/selectors';
 import { Board, establishmentEmoji, type BoardMode } from './Board';
-import { Bunting, ConfirmModal, Modal, money } from './bits';
+import { Bunting, Confetti, ConfirmModal, Modal, money } from './bits';
 import { RulesModal } from './RulesModal';
 import { TradeModal } from './TradeModal';
 import { flagGlyph } from './Lobby';
@@ -31,6 +32,9 @@ type Stage =
 
 export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast }: Props) {
   const me = state.players[state.currentPlayer];
+  const season = seasonForRound(content, state.round);
+  const nextSeason = seasonForRound(content, state.round + 1);
+  const rentMult = rentMultiplier(content, state.round);
 
   const [stage, setStage] = useState<Stage>({ kind: 'event' });
   const [showRules, setShowRules] = useState(false);
@@ -38,6 +42,8 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
   const [placingDef, setPlacingDef] = useState<EstablishmentDef | null>(null);
   const [pendingBuild, setPendingBuild] = useState<{ def: EstablishmentDef; slot: Slot } | null>(null);
   const [inspecting, setInspecting] = useState<string | null>(null);
+  const [berthInfo, setBerthInfo] = useState<Slot | null>(null);
+  const [zoneInfo, setZoneInfo] = useState<ZoneId | null>(null);
   const [showTrade, setShowTrade] = useState(false);
   const [confirm, setConfirm] = useState<{
     title: string; body: string; label: string; danger?: boolean; action: GameAction;
@@ -54,6 +60,8 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
       prevTurnKey.current = key;
       setPlacingDef(null);
       setInspecting(null);
+      setBerthInfo(null);
+      setZoneInfo(null);
       setShowCatalog(false);
       setShowTrade(false);
       if (state.phase !== 'game-over' && stage.kind !== 'dice-result') {
@@ -87,11 +95,15 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
 
   const onSlotClick = (slot: Slot) => {
     if (placingDef && !slot.structure) {
-      setPendingBuild({ def: placingDef, slot });
+      if (validSlots.has(slotKey(slot.zone, slot.index))) {
+        setPendingBuild({ def: placingDef, slot });
+      }
       return;
     }
     if (slot.structure) {
       setInspecting(slotKey(slot.zone, slot.index));
+    } else {
+      setBerthInfo(slot);
     }
   };
 
@@ -119,6 +131,24 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
               {flagGlyph(me.flagShape)} {me.name}
             </span>
           </span>
+          <span
+            className="season-chip"
+            title={`${season.blurb} Tourist tide ×${season.touristMult}. Next round: ${nextSeason.icon} ${nextSeason.name}.`}
+            aria-label={`Season: ${season.name}. ${season.blurb} Tourist tide ×${season.touristMult}. Next round: ${nextSeason.name}.`}
+          >
+            {season.icon} {season.name}
+            <span className="season-mult">×{season.touristMult}</span>
+            <span className="season-next" aria-label={`next season ${nextSeason.name}`}>→ {nextSeason.icon}</span>
+          </span>
+          {rentMult > 1 && (
+            <span
+              className="rent-chip"
+              title={`Rising rents: all upkeep is multiplied by ${rentMult.toFixed(2)} this round.`}
+              aria-label={`Rising rents: all upkeep is multiplied by ${rentMult.toFixed(2)} this round.`}
+            >
+              📈 Rents ×{rentMult.toFixed(2)}
+            </span>
+          )}
           <PhaseStepper phase={state.phase} />
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <button className="btn-ghost" style={{ color: 'var(--cream)', borderColor: 'var(--cream)' }} onClick={() => setShowRules(true)}>
@@ -136,9 +166,11 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
           <Board
             content={content}
             state={state}
+            season={season}
             mode={boardMode}
             selectedSlot={inspecting}
             onSlotClick={onSlotClick}
+            onZoneClick={(z) => setZoneInfo(z)}
           />
           <ActionBar
             content={content}
@@ -172,7 +204,7 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
       {/* ---------------- interstitials & modals ---------------- */}
 
       {stage.kind === 'event' && eventCard && state.phase !== 'game-over' && (
-        <Modal onClose={undefined} title={undefined}>
+        <Modal onClose={undefined} title={undefined} label={`Event card: ${eventCard.name}`}>
           <div className={`event-card cat-${eventCard.category}`}>
             <div className="ec-band">{categoryLabel(eventCard.category)}</div>
             <div className="ec-icon" aria-hidden>{categoryIcon(eventCard.category)}</div>
@@ -197,7 +229,7 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
       )}
 
       {stage.kind === 'handoff' && state.phase !== 'game-over' && (
-        <Modal>
+        <Modal label={`Pass the screen to ${me.name}`}>
           <div className="handoff">
             <div className="hand-emoji" aria-hidden>🫱</div>
             <h2>
@@ -205,7 +237,11 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
               <span style={{ color: me.color }}>{flagGlyph(me.flagShape)} {me.name}</span>
             </h2>
             <p style={{ color: 'var(--ink-soft)' }}>
-              {characterLine(content, state)} · {money(me.cash)} in the till
+              {characterLine(content, state)}
+            </p>
+            <p style={{ color: 'var(--ink-soft)' }}>
+              {season.icon} {season.name} · {money(me.cash)} in the till
+              {rentMult > 1 ? ` · rents ×${rentMult.toFixed(2)}` : ''}
             </p>
             <button
               className="btn-coral btn-big"
@@ -268,21 +304,18 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
           onPick={(def) => {
             setShowCatalog(false);
             setPlacingDef(def);
-            pushToast(`Choose a highlighted berth for the ${def.name}.`);
+            pushToast(`Choose a highlighted berth for the ${def.name}. Berth badges change the price.`);
           }}
           onClose={() => setShowCatalog(false)}
         />
       )}
 
       {pendingBuild && (
-        <ConfirmModal
-          title={`Build ${pendingBuild.def.name}?`}
-          body={
-            `${establishmentEmoji(pendingBuild.def.id)} ${pendingBuild.def.name} on the ` +
-            `${content.zones.find((z) => z.id === pendingBuild.slot.zone)!.name}, berth ${pendingBuild.slot.index + 1}, ` +
-            `for ${money(buildCost(content, state, me.id, pendingBuild.def.id))}. Building is final.`
-          }
-          confirmLabel={`Build for ${money(buildCost(content, state, me.id, pendingBuild.def.id))}`}
+        <BuildConfirm
+          content={content}
+          state={state}
+          def={pendingBuild.def}
+          slot={pendingBuild.slot}
           onConfirm={() => {
             dispatchAndToast({
               type: 'BUILD',
@@ -306,6 +339,23 @@ export function Game({ content, state, dispatch, onExit, onPlayAgain, pushToast 
             setConfirm({ title, body, label, danger, action })
           }
           onClose={() => setInspecting(null)}
+        />
+      )}
+
+      {berthInfo && !placingDef && (
+        <BerthModal
+          content={content}
+          slot={berthInfo}
+          onClose={() => setBerthInfo(null)}
+        />
+      )}
+
+      {zoneInfo && (
+        <ZoneModal
+          content={content}
+          state={state}
+          zone={zoneInfo}
+          onClose={() => setZoneInfo(null)}
         />
       )}
 
@@ -410,6 +460,9 @@ function ActionBar({
               Placing {establishmentEmoji(placingDef.id)} {placingDef.name} — pick a glowing berth
             </strong>
             <button className="btn-ghost" onClick={onCancelPlacing}>Cancel placement</button>
+            <span className="action-hint">
+              Berth badges are traits: they can change the price, the pull, and the upkeep. Hover or tap one to read it.
+            </span>
           </div>
         );
       }
@@ -419,7 +472,7 @@ function ActionBar({
           <button className="btn-quiet" onClick={onTrade}>🤝 Trade</button>
           <button className="btn-coral" onClick={onEndActions}>Done — to the Tourist Phase 🎲</button>
           <span className="action-hint">
-            Tap any establishment on the board to stack, sell, or mortgage it. {money(me.cash)} in the till.
+            Tap any establishment to stack, sell, or mortgage · tap an empty berth to read its traits · tap a 👥 chip for the zone's maths. {money(me.cash)} in the till.
           </span>
         </div>
       );
@@ -439,7 +492,7 @@ function ActionBar({
           </div>
           <button className="btn-coral" onClick={onBankrupt}>💸 Declare bankruptcy</button>
           <span className="action-hint">
-            Tap your establishments on the board: mortgage keeps them (at {Math.round(content.rules.mortgagePct * 100)}% value), selling lets go at {Math.round(content.rules.sellPct * 100)}%.
+            Tap your establishments on the board: mortgage keeps them (at {Math.round(content.rules.mortgagePct * 100)}% value), selling lets go at {Math.round(sellPctFor(content, me) * 100)}%.
           </span>
         </div>
       );
@@ -509,7 +562,7 @@ function LogPanel({ state }: { state: GameState }) {
       <h3>Seafront gazette</h3>
       <div className="log-scroll">
         {entries.map((e, i) => (
-          <div key={state.log.length - i} className="log-entry">
+          <div key={state.log.length - i} className={`log-entry log-${e.kind}`}>
             <span className="lr">R{e.round}</span>
             {e.text}
           </div>
@@ -526,8 +579,13 @@ function IncomeTable({
   state: GameState;
   report: NonNullable<GameState['lastIncome']>;
 }) {
+  const season = seasonForRound(content, state.round);
   return (
     <>
+      <p style={{ margin: '0 0 12px', color: 'var(--ink-soft)', fontSize: 'var(--fs-sm)' }}>
+        {season.icon} {season.name} · {state.totalTourists} tourists on the front
+        {report.rentMult > 1 ? ` · 📈 rents ×${report.rentMult.toFixed(2)}` : ''}
+      </p>
       {report.lines.length === 0 && (
         <p>No establishments yet — the seafront awaits your first build.</p>
       )}
@@ -545,7 +603,16 @@ function IncomeTable({
           <tbody>
             {report.lines.map((l) => (
               <tr key={l.slotKey}>
-                <td>{establishmentEmoji(l.slotKey.includes(':') ? findDefId(state, l.slotKey) : '')} {l.name}</td>
+                <td>
+                  {establishmentEmoji(findDefId(state, l.slotKey))} {l.name}
+                  {l.factors.length > 0 && (
+                    <div className="factor-row">
+                      {l.factors.map((f, i) => (
+                        <span key={i} className="factor-chip">{f}</span>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td>{content.zones.find((z) => z.id === l.zone)?.shortName}</td>
                 <td className="num">{l.tourists}</td>
                 <td className="num" style={{ color: l.gross > 0 ? 'var(--good)' : undefined }}>
@@ -590,17 +657,25 @@ function DiceStage({
   onRolled: () => void;
   onDone: () => void;
 }) {
-  // A short tumble, then the engine rolls for real.
+  // A short tumble, then the engine rolls for real. The callback lives in a
+  // ref so a mid-tumble re-render (e.g. a toast expiring) cannot cancel the
+  // pending roll and strand the dice.
   const fired = useRef(false);
+  const onRolledRef = useRef(onRolled);
+  onRolledRef.current = onRolled;
   useEffect(() => {
     if (!rolling || fired.current) return;
     fired.current = true;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const t = setTimeout(onRolled, reduced ? 50 : 900);
+    const t = setTimeout(() => onRolledRef.current(), reduced ? 50 : 900);
     return () => clearTimeout(t);
-  }, [rolling, onRolled]);
+  }, [rolling]);
 
   const dice = state.lastDice;
+  // While rolling, the season comes from the round in play; once rolled, the
+  // engine may already have advanced the round, so trust the dice record.
+  const rollingSeason = seasonForRound(content, state.round);
+  const season = (!rolling && dice && content.rules.seasons.find((s) => s.id === dice.seasonId)) || rollingSeason;
   const prefName =
     dice?.preference === 'spread'
       ? 'an even spread along the front'
@@ -609,6 +684,9 @@ function DiceStage({
   return (
     <Modal title="Tourist Phase">
       <div className="dice-stage">
+        <p style={{ margin: 0, color: 'var(--ink-soft)' }}>
+          {season.icon} {season.name} — tide ×{season.touristMult}
+        </p>
         <div className="dice-row">
           <div className={`die${rolling ? ' rolling' : ''}`}>{rolling ? '?' : dice?.volume[0]}</div>
           <div className={`die${rolling ? ' rolling' : ''}`}>{rolling ? '?' : dice?.volume[1]}</div>
@@ -650,14 +728,25 @@ function BuildCatalog({
   onClose: () => void;
 }) {
   const me = state.players[state.currentPlayer];
-  const freeSlotZones = new Set(state.slots.filter((s) => !s.structure).map((s) => s.zone));
   return (
     <Modal title="Build an establishment" wide onClose={onClose}>
+      <p style={{ margin: '0 0 10px', fontSize: 'var(--fs-sm)', color: 'var(--ink-soft)' }}>
+        Prices shown are list prices — the berth you choose can raise or lower them (its badges tell you how).
+      </p>
       <div className="catalog">
         {content.establishments.map((def) => {
           const cost = buildCost(content, state, me.id, def.id);
-          const anyRoom = def.zones.some((z) => freeSlotZones.has(z));
-          const affordable = cost <= me.cash;
+          // Affordability is judged against the CHEAPEST berth this could
+          // stand on — a quiet end can bring a build into reach.
+          let minCost = Infinity;
+          for (const slot of state.slots) {
+            if (slot.structure) continue;
+            const zone = content.zones.find((z) => z.id === slot.zone)!;
+            if (!zone.allows.includes(def.kind) || !def.zones.includes(slot.zone)) continue;
+            minCost = Math.min(minCost, buildCost(content, state, me.id, def.id, { zone: slot.zone, index: slot.index }));
+          }
+          const anyRoom = minCost !== Infinity;
+          const affordable = anyRoom && minCost <= me.cash;
           return (
             <button
               key={def.id}
@@ -669,13 +758,19 @@ function BuildCatalog({
               <div className="ci-head">
                 <span aria-hidden>{establishmentEmoji(def.id)}</span>
                 {def.name}
-                <span className="ci-cost">{money(cost)}</span>
+                <span className="ci-cost">
+                  {money(cost)}
+                  {anyRoom && minCost < cost && <span className="ci-from"> from {money(minCost)}</span>}
+                </span>
               </div>
               <div className="ci-meta">
                 <span className={`kind-tag kind-${def.kind}`}>{def.kind}</span>{' '}
                 pull {def.attraction} · {`£${def.incomePerTourist}`}/tourist · upkeep {money(def.maintenance)}
                 {def.maxLevels > 1 ? ` · stacks ×${def.maxLevels}` : ''}
               </div>
+              {def.tags.length > 0 && (
+                <div className="ci-meta">{def.tags.map((t) => tagLabel(t)).join(' · ')}</div>
+              )}
               <div className="ci-meta">
                 {def.zones.map((z) => content.zones.find((zz) => zz.id === z)?.shortName).join(', ')}
               </div>
@@ -686,6 +781,143 @@ function BuildCatalog({
       </div>
       <div className="modal-actions">
         <button className="btn-ghost" onClick={onClose}>Never mind</button>
+      </div>
+    </Modal>
+  );
+}
+
+function BuildConfirm({
+  content, state, def, slot, onConfirm, onCancel,
+}: {
+  content: ContentPack;
+  state: GameState;
+  def: EstablishmentDef;
+  slot: Slot;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const me = state.players[state.currentPlayer];
+  const cost = buildCost(content, state, me.id, def.id, { zone: slot.zone, index: slot.index });
+  const traits = traitsAt(content, slot.zone, slot.index);
+  const zoneName = content.zones.find((z) => z.id === slot.zone)!.name;
+  const affordable = cost <= me.cash;
+  return (
+    <Modal title={`Build ${def.name}?`} onClose={onCancel}>
+      <p style={{ marginTop: 0 }}>
+        {establishmentEmoji(def.id)} {def.name} on the {zoneName}, berth {slot.index + 1}, for{' '}
+        <strong>{money(cost)}</strong>. Building is final.
+      </p>
+      {traits.length > 0 && (
+        <div className="trait-list">
+          {traits.map((t) => (
+            <div key={t.id} className={`trait-line ${t.good ? 'good' : 'bad'}`}>
+              <span aria-hidden>{t.icon}</span>
+              <span><strong>{t.name}</strong> — {t.blurb}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {!affordable && (
+        <p style={{ color: 'var(--bad)', fontWeight: 700 }}>
+          This berth prices it beyond your till ({money(me.cash)}).
+        </p>
+      )}
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="btn-primary" onClick={onConfirm} disabled={!affordable} autoFocus>
+          Build for {money(cost)}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function BerthModal({
+  content, slot, onClose,
+}: {
+  content: ContentPack;
+  slot: Slot;
+  onClose: () => void;
+}) {
+  const zone = content.zones.find((z) => z.id === slot.zone)!;
+  const traits = traitsAt(content, slot.zone, slot.index);
+  const kinds = zone.allows.join(', ');
+  return (
+    <Modal title={`Berth ${slot.index + 1} — ${zone.name}`} onClose={onClose}>
+      <div className="structure-info">
+        <div className="si-row"><span>Ground</span><span className="v">open for {kinds}</span></div>
+        <div className="si-row"><span>Zone base pull</span><span className="v">{zone.baseAttraction}</span></div>
+        {traits.length === 0 && <p style={{ margin: 0, color: 'var(--ink-soft)' }}>Plain, honest ground — no printed traits.</p>}
+        {traits.length > 0 && (
+          <div className="trait-list">
+            {traits.map((t) => (
+              <div key={t.id} className={`trait-line ${t.good ? 'good' : 'bad'}`}>
+                <span aria-hidden>{t.icon}</span>
+                <span><strong>{t.name}</strong> — {t.blurb}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="modal-actions">
+        <button className="btn-primary" onClick={onClose}>Close</button>
+      </div>
+    </Modal>
+  );
+}
+
+function ZoneModal({
+  content, state, zone, onClose,
+}: {
+  content: ContentPack;
+  state: GameState;
+  zone: ZoneId;
+  onClose: () => void;
+}) {
+  const zoneDef = content.zones.find((z) => z.id === zone)!;
+  const attractions = zoneAttractions(content, state, state.preferredZone);
+  const info = attractions.find((z) => z.zone === zone)!;
+  const totalAll = attractions.reduce((s, z) => s + z.total, 0);
+  const share = totalAll > 0 ? Math.round((info.total / totalAll) * 100) : 0;
+  const tourists = state.tourists[zone] ?? 0;
+  const structures = state.slots
+    .filter((s) => s.zone === zone && s.structure)
+    .map((s) => ({
+      slot: s,
+      def: defById(content, s.structure!.pieces[0]),
+      owner: state.players[s.structure!.ownerId],
+      attraction: info.structures.get(slotKey(s.zone, s.index)) ?? 0,
+    }));
+  return (
+    <Modal title={`${zoneDef.name}`} onClose={onClose}>
+      <div className="structure-info">
+        <div className="si-row"><span>Base pull (empty ground)</span><span className="v">{zoneDef.baseAttraction}</span></div>
+        <div className="si-row"><span>Total attraction now</span><span className="v">{info.total.toFixed(1)}{info.preferred ? ' ★ preferred' : ''}</span></div>
+        <div className="si-row"><span>Share of the seafront</span><span className="v">{share}%</span></div>
+        <div className="si-row"><span>Tourists here this round</span><span className="v">👥 {tourists}</span></div>
+        {structures.length > 0 && (
+          <table className="income-table" style={{ marginTop: 8 }}>
+            <thead>
+              <tr><th>Establishment</th><th>Owner</th><th className="num">Pull</th></tr>
+            </thead>
+            <tbody>
+              {structures.map((s) => (
+                <tr key={slotKey(s.slot.zone, s.slot.index)}>
+                  <td>{establishmentEmoji(s.def.id)} {s.def.name}{s.slot.structure!.pieces.length > 1 ? ` ×${s.slot.structure!.pieces.length}` : ''}{s.slot.structure!.mortgaged ? ' 🔒' : ''}</td>
+                  <td style={{ color: s.owner.color, fontWeight: 700 }}>{flagGlyph(s.owner.flagShape)} {s.owner.name}</td>
+                  <td className="num">{s.attraction.toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {structures.length === 0 && <p style={{ margin: 0, color: 'var(--ink-soft)' }}>Nothing built here yet.</p>}
+        <p style={{ margin: 0, fontSize: 'var(--fs-xs)', color: 'var(--ink-soft)' }}>
+          Tourists pick zones in proportion to attraction; inside a zone they split across establishments the same way.
+        </p>
+      </div>
+      <div className="modal-actions">
+        <button className="btn-primary" onClick={onClose}>Close</button>
       </div>
     </Modal>
   );
@@ -710,9 +942,12 @@ function StructureModal({
   const inDebt = state.phase === 'settle-debt';
   const value = structureBaseValue(content, structure);
   const levels = structure.pieces.length;
-  const stackCost = buildCost(content, state, me.id, def.id);
+  const traits = traitsAt(content, slot.zone, slot.index);
+  const stackCost = buildCost(content, state, me.id, def.id, { zone: slot.zone, index: slot.index });
+  const ceiling = maxLevelsAt(content, slot.zone, slot.index, def);
+  const sellPct = sellPctFor(content, me);
   const canStack =
-    mine && !inDebt && def.kind === 'building' && levels < def.maxLevels && !structure.mortgaged;
+    mine && !inDebt && def.kind === 'building' && levels < ceiling && !structure.mortgaged;
 
   return (
     <Modal title={undefined} onClose={onClose}>
@@ -727,8 +962,21 @@ function StructureModal({
         </div>
         <div className="si-row"><span>Zone</span><span className="v">{zoneName}, berth {slot.index + 1}</span></div>
         <div className="si-row"><span>Invested</span><span className="v">{money(value)}</span></div>
-        <div className="si-row"><span>Upkeep per round</span><span className="v">{money(structure.pieces.reduce((s, id) => s + defById(content, id).maintenance, 0))}</span></div>
-        <div className="si-row"><span>Status</span><span className="v">{structure.mortgaged ? '🔒 Mortgaged (no income, no flag)' : 'Open for business'}</span></div>
+        <div className="si-row"><span>Upkeep per round</span><span className="v">{money(structure.pieces.reduce((s, id) => s + defById(content, id).maintenance, 0))} base</span></div>
+        <div className="si-row"><span>Status</span><span className="v">{structure.mortgaged ? '🔒 Mortgaged (no income, flag greyed)' : 'Open for business'}</span></div>
+        {def.tags.length > 0 && (
+          <div className="si-row"><span>Qualities</span><span className="v">{def.tags.map((t) => tagLabel(t)).join(' · ')}</span></div>
+        )}
+        {traits.length > 0 && (
+          <div className="trait-list">
+            {traits.map((t) => (
+              <div key={t.id} className={`trait-line ${t.good ? 'good' : 'bad'}`}>
+                <span aria-hidden>{t.icon}</span>
+                <span><strong>{t.name}</strong> — {t.blurb}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <p style={{ fontStyle: 'italic', color: 'var(--ink-soft)', margin: 0 }}>{def.flavor}</p>
       </div>
       {mine && canAct && (
@@ -748,6 +996,9 @@ function StructureModal({
             >
               🏗️ Stack (+{money(stackCost)})
             </button>
+          )}
+          {mine && !inDebt && def.kind === 'building' && !structure.mortgaged && levels >= ceiling && ceiling < def.maxLevels && (
+            <span className="action-hint" style={{ flexBasis: 'auto' }}>⚠️ The ground here cannot bear another storey.</span>
           )}
           {!structure.mortgaged && (
             <button
@@ -787,13 +1038,13 @@ function StructureModal({
                 onAction(
                   { type: 'SELL', zone: slot.zone, slotIndex: slot.index },
                   `Sell ${def.name} to the bank?`,
-                  `The bank pays ${money(Math.floor(value * content.rules.sellPct))} and the berth is cleared. Selling is final.`,
-                  `Sell for ${money(Math.floor(value * content.rules.sellPct))}`,
+                  `The bank pays ${money(Math.floor(value * sellPct))} and the berth is cleared. Selling is final.`,
+                  `Sell for ${money(Math.floor(value * sellPct))}`,
                   true,
                 )
               }
             >
-              💰 Sell (+{money(Math.floor(value * content.rules.sellPct))})
+              💰 Sell (+{money(Math.floor(value * sellPct))})
             </button>
           )}
         </div>
@@ -820,14 +1071,17 @@ function VictoryModal({
     return (b.eliminatedRound ?? 0) - (a.eliminatedRound ?? 0);
   });
   return (
-    <Modal wide>
+    <Modal wide label={`${winner.name} wins`}>
+      <Confetti />
       <div className="victory-stage">
         <div className="trophy" aria-hidden>🏆</div>
         <h2 style={{ fontSize: 'var(--fs-2xl)' }}>
           <span style={{ color: winner.color }}>{flagGlyph(winner.flagShape)} {winner.name}</span> rules the seafront!
         </h2>
         <p style={{ color: 'var(--ink-soft)' }}>
-          The last solvent entrepreneur after {state.round} round{state.round > 1 ? 's' : ''} of tides, gulls and grand openings.
+          {winner.eliminated
+            ? `Every till ran dry at once in round ${state.round} — the deepest assets carried the day.`
+            : `The last solvent entrepreneur after ${state.round} round${state.round > 1 ? 's' : ''} of tides, gulls and grand openings.`}
         </p>
         <Bunting width={360} />
         <table className="standings">
@@ -859,12 +1113,27 @@ function VictoryModal({
   );
 }
 
+/** Resistance and flavour tags, spelled out for players. */
+function tagLabel(tag: string): string {
+  switch (tag) {
+    case 'sturdy': return '🛡️ sturdy — stands through storms';
+    case 'clean': return '💧 clean — shrugs off pollution';
+    case 'netted': return '🕸️ netted — ignores seagulls';
+    case 'lit': return '🏮 lit — glows through fog';
+    case 'food': return '🍴 food — thrives in a scorcher';
+    case 'lodging': return '🛏️ lodging';
+    case 'amusement': return '🎪 amusement';
+    default: return tag;
+  }
+}
+
 function categoryLabel(cat: string): string {
   switch (cat) {
     case 'boom': return 'Tourist Boom';
     case 'shift': return 'The Winds Shift';
     case 'windfall': return 'Windfall';
     case 'levy': return 'The Bill Arrives';
+    case 'economy': return 'The Market Moves';
     case 'disaster': return 'DISASTER';
     default: return 'Event';
   }
@@ -875,6 +1144,7 @@ function categoryIcon(cat: string): string {
     case 'shift': return '🎠';
     case 'windfall': return '💷';
     case 'levy': return '🧾';
+    case 'economy': return '🏗️';
     case 'disaster': return '🌩️';
     default: return '🃏';
   }

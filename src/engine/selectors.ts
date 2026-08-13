@@ -1,11 +1,14 @@
 import type {
+  BerthTraitDef,
   ContentPack,
   DisasterDef,
   DisasterId,
   EstablishmentDef,
+  EstablishmentTag,
   GameState,
   IncomeReport,
   PlayerState,
+  SeasonDef,
   Slot,
   Structure,
   ZoneId,
@@ -31,9 +34,84 @@ export function characterOf(content: ContentPack, player: PlayerState) {
   return c;
 }
 
-/** Total build cost paid for a structure (sum of stacked pieces at list price). */
+/**
+ * What was actually paid for a structure. Sales, mortgages and asset values
+ * are all fractions of this, so discounted builds can never be resold at a
+ * profit. (Falls back to list price for structures created before invested
+ * cost was tracked.)
+ */
 export function structureBaseValue(content: ContentPack, structure: Structure): number {
-  return structure.pieces.reduce((sum, id) => sum + defById(content, id).cost, 0);
+  return structure.invested ?? structure.pieces.reduce((sum, id) => sum + defById(content, id).cost, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Berth traits                                                        */
+/* ------------------------------------------------------------------ */
+
+/** The traits printed on one berth of the board (empty for plain ground). */
+export function traitsAt(content: ContentPack, zone: ZoneId, index: number): BerthTraitDef[] {
+  const ids = content.berthTraits[slotKey(zone, index)] ?? [];
+  return ids
+    .map((id) => content.traits.find((t) => t.id === id))
+    .filter((t): t is BerthTraitDef => !!t);
+}
+
+function traitProduct(traits: BerthTraitDef[], pick: (t: BerthTraitDef) => number | undefined): number {
+  return traits.reduce((m, t) => m * (pick(t) ?? 1), 1);
+}
+
+/** Stack ceiling at a berth: the establishment's own cap, minus any ground limits. */
+export function maxLevelsAt(content: ContentPack, zone: ZoneId, index: number, def: EstablishmentDef): number {
+  const caps = traitsAt(content, zone, index)
+    .map((t) => t.maxLevelsCap)
+    .filter((c): c is number => c !== undefined);
+  return Math.min(def.maxLevels, ...caps);
+}
+
+/** Tags a structure counts as having: its pieces' tags plus berth-granted ones. */
+function effectiveTags(content: ContentPack, slot: Slot): Set<EstablishmentTag> {
+  const tags = new Set<EstablishmentTag>();
+  for (const id of slot.structure?.pieces ?? []) {
+    for (const tag of defById(content, id).tags) tags.add(tag);
+  }
+  for (const trait of traitsAt(content, slot.zone, slot.index)) {
+    for (const tag of trait.grantsTags ?? []) tags.add(tag);
+  }
+  return tags;
+}
+
+/* ------------------------------------------------------------------ */
+/* Seasons and rising rents                                            */
+/* ------------------------------------------------------------------ */
+
+/** The season wheel turns once per round. */
+export function seasonForRound(content: ContentPack, round: number): SeasonDef {
+  const seasons = content.rules.seasons;
+  return seasons[(round - 1) % seasons.length];
+}
+
+/** Rising rents: upkeep multiplier for a round (compounds as the resort grows). */
+export function rentMultiplier(content: ContentPack, round: number): number {
+  const { rentEscalationEvery, rentEscalationMult } = content.rules;
+  return Math.pow(rentEscalationMult, Math.floor((round - 1) / rentEscalationEvery));
+}
+
+/** Economy-card build cost multiplier currently in force. */
+export function globalCostMult(state: GameState): number {
+  let mult = 1;
+  for (const eff of state.activeEffects) {
+    if (eff.effect.type === 'globalMult' && eff.effect.costMult !== undefined) mult *= eff.effect.costMult;
+  }
+  return mult;
+}
+
+/** Economy-card upkeep multiplier currently in force (0 during a maintenance holiday). */
+export function globalUpkeepMult(state: GameState): number {
+  let mult = 1;
+  for (const eff of state.activeEffects) {
+    if (eff.effect.type === 'globalMult' && eff.effect.upkeepMult !== undefined) mult *= eff.effect.upkeepMult;
+  }
+  return mult;
 }
 
 /* ------------------------------------------------------------------ */
@@ -88,31 +166,37 @@ export function activeDisasters(state: GameState, content: ContentPack): Disaste
   return out;
 }
 
-function structureResists(content: ContentPack, state: GameState, structure: Structure, disaster: DisasterDef): boolean {
+function structureResists(content: ContentPack, state: GameState, slot: Slot, disaster: DisasterDef): boolean {
+  const structure = slot.structure!;
   const owner = state.players[structure.ownerId];
   const char = characterOf(content, owner);
+  if (char.bonus.type === 'resistAllDisasters') return true;
   if (char.bonus.type === 'resistDisaster' && char.bonus.disaster === disaster.id) return true;
-  return structure.pieces.some((id) => defById(content, id).tags.includes(disaster.resistedBy));
+  return effectiveTags(content, slot).has(disaster.resistedBy);
 }
 
 interface StructureModifiers {
   attractionMult: number;
   incomeMult: number;
+  /** Names of disasters actually biting this structure (for income factor chips). */
+  applied: string[];
 }
 
 function disasterModifiers(content: ContentPack, state: GameState, slot: Slot): StructureModifiers {
   let attractionMult = 1;
   let incomeMult = 1;
+  const applied: string[] = [];
   const structure = slot.structure!;
   const topDef = defById(content, structure.pieces[0]);
   for (const disaster of activeDisasters(state, content)) {
     if (!disaster.zones.includes(slot.zone)) continue;
     if (disaster.kindFilter && topDef.kind !== disaster.kindFilter) continue;
-    if (structureResists(content, state, structure, disaster)) continue;
+    if (structureResists(content, state, slot, disaster)) continue;
     attractionMult *= disaster.attractionMult;
     incomeMult *= disaster.incomeMult;
+    applied.push(`${disaster.icon} ${disaster.name}`);
   }
-  return { attractionMult, incomeMult };
+  return { attractionMult, incomeMult, applied };
 }
 
 function zoneBoostMult(state: GameState, zone: ZoneId): number {
@@ -123,12 +207,16 @@ function zoneBoostMult(state: GameState, zone: ZoneId): number {
   return mult;
 }
 
-function kindIncomeMult(state: GameState, kind: EstablishmentDef['kind']): number {
+function kindIncomeMult(state: GameState, kind: EstablishmentDef['kind']): { mult: number; names: string[] } {
   let mult = 1;
+  const names: string[] = [];
   for (const eff of state.activeEffects) {
-    if (eff.effect.type === 'kindBoost' && eff.effect.kind === kind) mult *= eff.effect.incomeMult;
+    if (eff.effect.type === 'kindBoost' && eff.effect.kind === kind) {
+      mult *= eff.effect.incomeMult;
+      names.push(eff.sourceName);
+    }
   }
-  return mult;
+  return { mult, names };
 }
 
 export function touristDelta(state: GameState): number {
@@ -145,7 +233,7 @@ export function touristDelta(state: GameState): number {
 
 /**
  * Attraction points of one structure, including stack level multiplier,
- * character bonuses, cluster multiplier and disaster modifiers.
+ * berth traits, character bonuses, cluster multiplier and disaster modifiers.
  * Mortgaged structures attract nothing (flag lowered).
  */
 export function structureAttraction(
@@ -167,11 +255,13 @@ export function structureAttraction(
   let bonusMult = 1;
   if (char.bonus.type === 'attractionBonus' && char.bonus.kind === topDef.kind) bonusMult += char.bonus.pct;
 
+  const traitMult = traitProduct(traitsAt(content, slot.zone, slot.index), (t) => t.attractionMult);
+
   let size = clusters.get(slotKey(slot.zone, slot.index)) ?? 1;
   if (char.bonus.type === 'clusterBonus' && size > 1) size += char.bonus.extraSize;
 
   const mods = disasterModifiers(content, state, slot);
-  return leveled * bonusMult * clusterMult(content, size) * mods.attractionMult;
+  return leveled * bonusMult * traitMult * clusterMult(content, size) * mods.attractionMult;
 }
 
 export interface ZoneAttraction {
@@ -252,7 +342,8 @@ export function distributeTourists(
  * Income report for one player given the current tourist distribution.
  * Tourists inside a zone split across structures proportional to attraction;
  * each structure earns tourists × incomePerTourist (weighted across its stack),
- * minus maintenance.
+ * times berth traits and event modifiers, minus maintenance (which rises with
+ * the rent escalator and the berth's own upkeep traits).
  */
 export function computeIncome(content: ContentPack, state: GameState, playerId: number): IncomeReport {
   const clusters = clusterSizes(state);
@@ -260,6 +351,8 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
   const byZone = new Map(attractions.map((z) => [z.zone, z]));
   const player = state.players[playerId];
   const char = characterOf(content, player);
+  const rentMult = rentMultiplier(content, state.round);
+  const upkeepHoliday = globalUpkeepMult(state);
 
   const report: IncomeReport = {
     playerId,
@@ -268,6 +361,7 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
     gross: 0,
     maintenance: 0,
     net: 0,
+    rentMult,
   };
 
   for (const slot of state.slots) {
@@ -275,10 +369,18 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
     if (!structure || structure.ownerId !== playerId) continue;
     const def = defById(content, structure.pieces[0]);
     const levels = structure.pieces.length;
+    const traits = traitsAt(content, slot.zone, slot.index);
+    const factors: string[] = [];
 
     // Maintenance is owed even while mortgaged (reduced) — the bankruptcy pressure.
     let maintenance = structure.pieces.reduce((s, id) => s + defById(content, id).maintenance, 0);
-    if (structure.mortgaged) maintenance = Math.ceil(maintenance * content.rules.mortgagedMaintenancePct);
+    maintenance *= traitProduct(traits, (t) => t.upkeepMult);
+    maintenance *= rentMult * upkeepHoliday;
+    if (structure.mortgaged) maintenance *= content.rules.mortgagedMaintenancePct;
+    if (char.bonus.type === 'maintenanceDiscount' && char.bonus.kind === def.kind) {
+      maintenance *= 1 - char.bonus.pct;
+    }
+    maintenance = Math.ceil(maintenance);
     if (char.bonus.type === 'noMaintenance' && char.bonus.kind === def.kind) maintenance = 0;
 
     let tourists = 0;
@@ -292,9 +394,23 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
         tourists = Math.round((zoneTourists * myAttraction) / structTotal);
         const rate =
           structure.pieces.reduce((s, id) => s + defById(content, id).incomePerTourist, 0) / levels;
+        const kindMult = kindIncomeMult(state, def.kind);
+        const traitIncome = traitProduct(traits, (t) => t.incomeMult);
+        let charIncome = 1;
+        if (char.bonus.type === 'incomeBonus' && char.bonus.kind === def.kind) charIncome += char.bonus.pct;
         const mods = disasterModifiers(content, state, slot);
-        gross = Math.round(tourists * rate * kindIncomeMult(state, def.kind) * mods.incomeMult);
+        gross = Math.round(tourists * rate * kindMult.mult * traitIncome * charIncome * mods.incomeMult);
+
+        // Human-readable factor chips for the income review.
+        const clusterSize = clusters.get(slotKey(slot.zone, slot.index)) ?? 1;
+        if (clusterSize > 1) factors.push(`🎪 cluster of ${clusterSize} ×${clusterMult(content, clusterSize).toFixed(2)}`);
+        if (levels > 1) factors.push(`🏗️ ${levels} storeys ×${content.rules.levelMult[levels - 1]}`);
+        for (const t of traits) factors.push(`${t.icon} ${t.name}`);
+        for (const name of kindMult.names) factors.push(`🎠 ${name} ×${kindMult.mult}`);
+        for (const name of mods.applied) factors.push(name);
       }
+    } else {
+      factors.push('🔒 mortgaged');
     }
 
     report.lines.push({
@@ -305,6 +421,7 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
       tourists,
       gross,
       maintenance,
+      factors,
     });
     report.gross += gross;
     report.maintenance += maintenance;
@@ -318,13 +435,22 @@ export function computeIncome(content: ContentPack, state: GameState, playerId: 
 /* Valuation                                                           */
 /* ------------------------------------------------------------------ */
 
+/** Sale fraction for a player (the Dealmaker gets a better rate). */
+export function sellPctFor(content: ContentPack, player: PlayerState): number {
+  const char = characterOf(content, player);
+  const bonus = char.bonus.type === 'sellBonus' ? char.bonus.pct : 0;
+  return content.rules.sellPct + bonus;
+}
+
 /** Cash the player could raise right now: cash + sale value + mortgage headroom. */
 export function liquidationValue(content: ContentPack, state: GameState, playerId: number): number {
-  let total = state.players[playerId].cash;
+  const player = state.players[playerId];
+  const pct = sellPctFor(content, player);
+  let total = player.cash;
   for (const slot of state.slots) {
     const s = slot.structure;
     if (!s || s.ownerId !== playerId) continue;
-    if (!s.mortgaged) total += Math.floor(structureBaseValue(content, s) * content.rules.sellPct);
+    if (!s.mortgaged) total += Math.floor(structureBaseValue(content, s) * pct);
   }
   return total;
 }
@@ -340,14 +466,26 @@ export function assetValue(content: ContentPack, state: GameState, playerId: num
   return total;
 }
 
-export function buildCost(content: ContentPack, state: GameState, playerId: number, defId: string): number {
+/**
+ * Cost to build (or stack) a piece. Includes the character discount, the
+ * economy cards in force, and — when a berth is specified — its cost traits.
+ */
+export function buildCost(
+  content: ContentPack,
+  state: GameState,
+  playerId: number,
+  defId: string,
+  at?: { zone: ZoneId; index: number },
+): number {
   const def = defById(content, defId);
   const char = characterOf(content, state.players[playerId]);
   let cost = def.cost;
   if (char.bonus.type === 'buildDiscount' && char.bonus.kind === def.kind) {
-    cost = Math.round(cost * (1 - char.bonus.pct));
+    cost *= 1 - char.bonus.pct;
   }
-  return cost;
+  cost *= globalCostMult(state);
+  if (at) cost *= traitProduct(traitsAt(content, at.zone, at.index), (t) => t.costMult);
+  return Math.round(cost);
 }
 
 export function playersRemaining(state: GameState): PlayerState[] {

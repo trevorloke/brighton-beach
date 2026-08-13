@@ -17,23 +17,49 @@ export function money(n: number): string {
   return `£${n.toLocaleString('en-GB')}`;
 }
 
+/** Celebration: paper squares tumbling down over the victory screen. */
+export function Confetti() {
+  return (
+    <div className="confetti" aria-hidden>
+      {Array.from({ length: 48 }, (_, i) => (
+        <i
+          key={i}
+          style={{
+            left: `${(i * 41) % 100}%`,
+            animationDelay: `${((i * 23) % 40) / 20}s`,
+            animationDuration: `${2.4 + ((i * 13) % 20) / 10}s`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 interface ModalProps {
   title?: string;
+  /** Accessible name when there is no visible title. */
+  label?: string;
   wide?: boolean;
   onClose?: () => void;
   children: ReactNode;
-  labelledBy?: string;
 }
 
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 /**
- * Modal shell: focus moves in on open, Escape closes (when closable),
+ * Modal shell: focus moves in on open (respecting any autoFocus inside),
+ * Tab is trapped within the dialog, Escape closes (when closable),
  * click on the backdrop closes.
  */
-export function Modal({ title, wide, onClose, children }: ModalProps) {
+export function Modal({ title, label, wide, onClose, children }: ModalProps) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    ref.current?.focus();
+    // Don't steal focus from an autoFocus element already inside the dialog.
+    if (ref.current && !ref.current.contains(document.activeElement)) {
+      ref.current.focus();
+    }
     return () => previous?.focus();
   }, []);
   return (
@@ -47,11 +73,24 @@ export function Modal({ title, wide, onClose, children }: ModalProps) {
         className={`modal${wide ? ' modal-wide' : ''}`}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={title ?? label}
         tabIndex={-1}
         ref={ref}
         onKeyDown={(e) => {
           if (e.key === 'Escape') onClose?.();
+          if (e.key === 'Tab' && ref.current) {
+            const focusables = Array.from(ref.current.querySelectorAll<HTMLElement>(FOCUSABLE));
+            if (focusables.length === 0) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (e.shiftKey && (document.activeElement === first || document.activeElement === ref.current)) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
         }}
       >
         {title && <h2>{title}</h2>}

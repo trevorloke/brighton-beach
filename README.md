@@ -1,8 +1,10 @@
 # Brighton Beach — digital edition
 
 The seaside strategy board game, playable in the browser. Rival entrepreneurs build kiosks,
-buildings and monuments across five zones of the Brighton seafront, chase the tourist tide,
-trade and negotiate, weather storms, pollution and seagulls — until only one player is solvent.
+buildings and monuments across 40 berths in five zones of the Brighton seafront — each berth
+with its own printed traits — chase a tourist tide that swells and freezes with the turning
+seasons, trade and negotiate, weather storms, pollution, seagulls, fog and scorchers, and
+race the rising rents — until only one player is solvent.
 
 **v1 scope:** the full base game, 2–4 players, local hotseat (pass-and-play), per the
 [digital brief](#) and the Brighton Beach rulebook. Expansions and variants are out of scope
@@ -42,9 +44,10 @@ Design decisions that matter:
   restructuring.
 - **Determinism.** The RNG state lives inside the serializable `GameState`; a seed plus an
   action log reproduces any game exactly. The test suite relies on this.
-- **Everything is data.** Establishments, event cards, disasters, characters, zones and every
-  tunable number live in `content.ts` as a `ContentPack`. High Tide terrain or Festive's Party
-  Island become new entries (a new zone id + establishments that list it), not engine changes.
+- **Everything is data.** Establishments, event cards, disasters, characters, zones, berth
+  traits, the season wheel and every tunable number live in `content.ts` as a `ContentPack`.
+  High Tide terrain or Festive's Party Island become new entries (a new zone id +
+  establishments that list it), not engine changes.
 - **Persistence.** State serializes to JSON; the app autosaves to `localStorage` after every
   action and the lobby offers resume.
 - **Confirmation pattern.** Nothing irreversible — building, stacking, selling, mortgaging,
@@ -54,17 +57,22 @@ Design decisions that matter:
 
 ## Testing
 
-`npm test` runs 52 engine tests: income math, cluster multipliers, stacking curves,
-disaster effects and resistances, mortgage/sell/trade rules, bankruptcy edge cases including
-the simultaneous-bankruptcy tie rule (8.4), serialization round-trips, and full simulated
-2/3/4-player games driven by a random-but-legal bot that asserts board invariants on every
-intermediate state and requires each game to reach a winner.
+`npm test` runs 77 engine tests: income math, cluster multipliers, stacking curves, berth
+trait effects (costs, attraction, income, upkeep, granted resistances, stack caps), the
+season wheel, rising rents, every event-effect kind, all five disasters and their
+resistances, mortgage/sell/trade rules, the no-resale-profit invariant, bankruptcy edge
+cases including the simultaneous-bankruptcy tie rule (8.4) and levy-before-income recovery,
+serialization round-trips, and full simulated 2/3/4-player games driven by a random-but-legal
+bot that asserts board invariants on every intermediate state and requires each game to
+reach a winner.
 
 ## Balancing
 
 The rulebook defines systems, not numbers. Every number in play is proposed in
 [BALANCING.md](./BALANCING.md) — the worksheet awaiting sign-off — and implemented in
-`src/engine/content.ts` so tuning is a data edit.
+`src/engine/content.ts` so tuning is a data edit. This revision was levelled empirically:
+hundreds of bot-driven games measured character win rates and game horizons, and the
+worksheet records what was changed and why.
 
 ## Design
 

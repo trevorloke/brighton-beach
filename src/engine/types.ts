@@ -21,7 +21,14 @@ export interface ZoneDef {
 export type EstablishmentKind = 'kiosk' | 'building' | 'monument';
 
 /** Tags used by disasters/events for resistance and targeting. */
-export type EstablishmentTag = 'sturdy' | 'clean' | 'netted' | 'food' | 'lodging' | 'amusement';
+export type EstablishmentTag =
+  | 'sturdy' // stands through storms
+  | 'clean' // shrugs off pollution
+  | 'netted' // ignores seagulls
+  | 'lit' // glows through sea fog
+  | 'food' // thrives in a scorcher
+  | 'lodging'
+  | 'amusement';
 
 export interface EstablishmentDef {
   id: string;
@@ -42,7 +49,31 @@ export interface EstablishmentDef {
   flavor: string;
 }
 
-export type DisasterId = 'storm' | 'pollution' | 'seagulls';
+/**
+ * A named quality of one specific berth — the board is a designed artifact
+ * and every square can carry advantages and disadvantages. All multipliers
+ * default to 1 (absent = no effect).
+ */
+export interface BerthTraitDef {
+  id: string;
+  name: string;
+  /** One-glyph badge drawn on the board berth. */
+  icon: string;
+  /** Short explanation shown in placement and inspection UI. */
+  blurb: string;
+  /** Whether the trait reads as an advantage (UI colouring only). */
+  good: boolean;
+  attractionMult?: number;
+  incomeMult?: number;
+  upkeepMult?: number;
+  costMult?: number;
+  /** The structure here counts as having these tags (e.g. sheltered = sturdy). */
+  grantsTags?: EstablishmentTag[];
+  /** Hard cap on stack height at this berth (subsiding ground, etc.). */
+  maxLevelsCap?: number;
+}
+
+export type DisasterId = 'storm' | 'pollution' | 'seagulls' | 'fog' | 'heatwave';
 
 export interface DisasterDef {
   id: DisasterId;
@@ -69,12 +100,15 @@ export type EventEffect =
   | { type: 'kindBoost'; kind: EstablishmentKind; incomeMult: number; duration: number }
   | { type: 'cashAll'; amount: number } // negative = tax on everyone (bankruptcy pressure)
   | { type: 'cashCurrent'; amount: number }
+  | { type: 'perStructureCash'; amount: number; kind?: EstablishmentKind } // levy/grant scaled to holdings
+  | { type: 'transferRichPoor'; amount: number } // richest player pays the poorest
+  | { type: 'globalMult'; costMult?: number; upkeepMult?: number; duration: number } // economy swings
   | { type: 'disaster'; disaster: DisasterId };
 
 export interface EventCardDef {
   id: string;
   name: string;
-  category: 'boom' | 'shift' | 'windfall' | 'levy' | 'disaster';
+  category: 'boom' | 'shift' | 'windfall' | 'levy' | 'economy' | 'disaster';
   description: string;
   effects: EventEffect[];
 }
@@ -88,10 +122,24 @@ export interface CharacterDef {
   bonus:
     | { type: 'buildDiscount'; kind: EstablishmentKind; pct: number }
     | { type: 'attractionBonus'; kind: EstablishmentKind; pct: number }
+    | { type: 'incomeBonus'; kind: EstablishmentKind; pct: number }
     | { type: 'noMaintenance'; kind: EstablishmentKind }
+    | { type: 'maintenanceDiscount'; kind: EstablishmentKind; pct: number }
     | { type: 'incomeFlat'; amount: number }
     | { type: 'resistDisaster'; disaster: DisasterId }
-    | { type: 'clusterBonus'; extraSize: number };
+    | { type: 'resistAllDisasters' }
+    | { type: 'clusterBonus'; extraSize: number }
+    | { type: 'sellBonus'; pct: number }; // extra fraction on bank sales
+}
+
+/** One step of the rotating season wheel (round-driven, fully data). */
+export interface SeasonDef {
+  id: string;
+  name: string;
+  icon: string;
+  /** Multiplier on the natural tourist tide. */
+  touristMult: number;
+  blurb: string;
 }
 
 /** Everything data-driven, injected into the engine at game creation. */
@@ -101,14 +149,21 @@ export interface ContentPack {
   events: EventCardDef[];
   disasters: DisasterDef[];
   characters: CharacterDef[];
+  /** Trait vocabulary for berths. */
+  traits: BerthTraitDef[];
+  /** Fixed board map: slot key ("zone:index") -> trait ids on that berth. */
+  berthTraits: Record<string, string[]>;
   rules: RuleNumbers;
 }
 
 /** The balancing worksheet — every tunable number in one place. */
 export interface RuleNumbers {
   startingCapital: Record<number, number>; // by player count
-  /** tourists = (2d6 sum) * touristsPerPip */
+  /** tourists = (touristBase + 2d6 sum × touristsPerPip) × season multiplier */
+  touristBase: number;
   touristsPerPip: number;
+  /** Extra tourists on double sixes. */
+  surgeBonus: number;
   /** Cluster attraction multiplier = clusterBase ^ (clusterSize - 1), capped. */
   clusterBase: number;
   clusterCap: number;
@@ -120,6 +175,11 @@ export interface RuleNumbers {
   mortgagePct: number; // cash received when mortgaging
   unmortgagePct: number; // cost to lift a mortgage
   mortgagedMaintenancePct: number; // upkeep fraction while mortgaged
+  /** The season wheel, cycled by round number. */
+  seasons: SeasonDef[];
+  /** Rising rents: upkeep × rentEscalationMult^floor((round-1)/rentEscalationEvery). */
+  rentEscalationEvery: number;
+  rentEscalationMult: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -131,6 +191,12 @@ export interface Structure {
   pieces: string[];
   ownerId: number;
   mortgaged: boolean;
+  /**
+   * Cash actually paid to build this structure (after berth traits, character
+   * discounts and economy cards). Sales and mortgages pay out fractions of
+   * THIS, so no combination of discounts can mint money through resale.
+   */
+  invested: number;
 }
 
 export interface Slot {
@@ -174,6 +240,8 @@ export interface IncomeLine {
   tourists: number;
   gross: number;
   maintenance: number;
+  /** Human-readable multiplier chips: cluster, stack, traits, events, disasters. */
+  factors: string[];
 }
 
 export interface IncomeReport {
@@ -183,6 +251,8 @@ export interface IncomeReport {
   gross: number;
   maintenance: number;
   net: number;
+  /** Rising-rents multiplier in force this round (1 = base rents). */
+  rentMult: number;
 }
 
 export interface DiceResult {
@@ -190,6 +260,9 @@ export interface DiceResult {
   /** Index into zones, or 'spread' for an even day. */
   preference: ZoneId | 'spread';
   tourists: number;
+  /** Season in force when the dice were thrown (the round may advance after). */
+  seasonId: string;
+  seasonMult: number;
   triggeredDisaster: DisasterId | null;
   surge: boolean;
 }
@@ -197,11 +270,11 @@ export interface DiceResult {
 export interface LogEntry {
   round: number;
   text: string;
-  kind: 'phase' | 'build' | 'money' | 'event' | 'disaster' | 'trade' | 'elimination' | 'dice' | 'info';
+  kind: 'phase' | 'build' | 'money' | 'event' | 'disaster' | 'trade' | 'elimination' | 'dice' | 'season' | 'info';
 }
 
 export interface GameState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   seed: number;
   rng: RngState;
   players: PlayerState[];
@@ -222,6 +295,12 @@ export interface GameState {
   lastIncome: IncomeReport | null;
   /** Outstanding amount the current player must raise during settle-debt. */
   debt: number;
+  /**
+   * Phase to resume once the debt is settled: 'income' when a round-start levy
+   * struck before the player could open their tills (so they still collect),
+   * 'action' otherwise.
+   */
+  settleReturn: 'income' | 'action';
   winnerId: number | null;
   log: LogEntry[];
 }

@@ -21,7 +21,11 @@ import {
   distributeTourists,
   findSlot,
   liquidationValue,
+  maxLevelsAt,
   playersRemaining,
+  rentMultiplier,
+  seasonForRound,
+  sellPctFor,
   slotKey,
   structureBaseValue,
 } from './selectors';
@@ -59,7 +63,7 @@ export function createGame(content: ContentPack, config: GameConfig): GameState 
   }
 
   const state: GameState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     seed: config.seed,
     rng,
     players: config.players.map((p, id) => ({
@@ -87,11 +91,14 @@ export function createGame(content: ContentPack, config: GameConfig): GameState 
     lastDice: null,
     lastIncome: null,
     debt: 0,
+    settleReturn: 'action',
     winnerId: null,
     log: [],
   };
 
-  const opened = log(state, 'info', `The season opens on Brighton Beach. Each entrepreneur starts with £${capital}.`);
+  let opened = log(state, 'info', `The season opens on Brighton Beach. Each entrepreneur starts with £${capital}.`);
+  const season = seasonForRound(content, 1);
+  opened = log(opened, 'season', `${season.icon} ${season.name}. ${season.blurb}`);
   // Round 1 begins with an event draw, like every round.
   return drawEvent(content, opened);
 }
@@ -152,13 +159,57 @@ function triggerDisaster(content: ContentPack, state: GameState, id: DisasterId,
   return next;
 }
 
+/**
+ * Apply a cash change to every remaining player at once (levies, grants,
+ * per-structure charges). Handles rule 8.4: if a shared levy sinks every
+ * remaining player beyond recovery, they all go under together and the
+ * highest asset value before the obligation wins.
+ */
+function applyGroupCash(
+  content: ContentPack,
+  state: GameState,
+  deltaFor: (playerId: number) => number,
+  cardName: string,
+): GameState {
+  let next = state;
+  const before = new Map(playersRemaining(next).map((p) => [p.id, assetValue(content, next, p.id)]));
+  let anyCharge = false;
+  for (const p of playersRemaining(next)) {
+    const delta = deltaFor(p.id);
+    if (delta === 0) continue;
+    if (delta < 0) anyCharge = true;
+    next = withPlayerCash(next, p.id, delta);
+  }
+  if (anyCharge) {
+    const remaining = playersRemaining(next);
+    const allSunk = remaining.every((p) => liquidationValue(content, next, p.id) < 0);
+    if (allSunk && remaining.length > 0) {
+      // Simultaneous bankruptcy: everyone goes under together.
+      next = {
+        ...next,
+        players: next.players.map((p) =>
+          p.eliminated
+            ? p
+            : { ...p, eliminated: true, eliminatedRound: next.round, assetValueAtElimination: before.get(p.id) ?? 0, cash: 0 },
+        ),
+        slots: next.slots.map((s) => ({ ...s, structure: null })),
+      };
+      next = log(next, 'elimination', `💸 ${cardName} bankrupts every remaining player at once.`);
+      next = checkVictory(content, next);
+    }
+  }
+  return next;
+}
+
 function applyEventCard(content: ContentPack, state: GameState, card: EventCardDef): GameState {
   let next = state;
   for (const effect of card.effects) {
+    if (next.phase === 'game-over') return next;
     switch (effect.type) {
       case 'touristDelta':
       case 'zoneBoost':
       case 'kindBoost':
+      case 'globalMult':
         next = {
           ...next,
           activeEffects: [
@@ -168,30 +219,34 @@ function applyEventCard(content: ContentPack, state: GameState, card: EventCardD
         };
         break;
       case 'cashAll': {
-        // Snapshot asset values before the obligation lands — rule 8.4's
-        // tie-break uses value "before paying their obligations".
-        const before = new Map(playersRemaining(next).map((p) => [p.id, assetValue(content, next, p.id)]));
-        for (const p of playersRemaining(next)) next = withPlayerCash(next, p.id, effect.amount);
         const verb = effect.amount >= 0 ? 'receives' : 'pays';
+        next = applyGroupCash(content, next, () => effect.amount, card.name);
         next = log(next, 'money', `Every player ${verb} £${Math.abs(effect.amount)} (${card.name}).`);
-        if (effect.amount < 0) {
-          const remaining = playersRemaining(next);
-          const allSunk = remaining.every((p) => liquidationValue(content, next, p.id) < 0);
-          if (allSunk && remaining.length > 0) {
-            // Simultaneous bankruptcy: everyone goes under together.
-            next = {
-              ...next,
-              players: next.players.map((p) =>
-                p.eliminated
-                  ? p
-                  : { ...p, eliminated: true, eliminatedRound: next.round, assetValueAtElimination: before.get(p.id) ?? 0, cash: 0 },
-              ),
-              slots: next.slots.map((s) => ({ ...s, structure: null })),
-            };
-            next = log(next, 'elimination', `💸 ${card.name} bankrupts every remaining player at once.`);
-            next = checkVictory(content, next);
-          }
+        break;
+      }
+      case 'perStructureCash': {
+        const counts = new Map<number, number>();
+        for (const slot of next.slots) {
+          const s = slot.structure;
+          if (!s) continue;
+          if (effect.kind && defById(content, s.pieces[0]).kind !== effect.kind) continue;
+          counts.set(s.ownerId, (counts.get(s.ownerId) ?? 0) + 1);
         }
+        const verb = effect.amount >= 0 ? 'receives' : 'pays';
+        const what = effect.kind ? `${effect.kind}` : 'establishment';
+        next = applyGroupCash(content, next, (id) => (counts.get(id) ?? 0) * effect.amount, card.name);
+        next = log(next, 'money', `Every player ${verb} £${Math.abs(effect.amount)} per ${what} (${card.name}).`);
+        break;
+      }
+      case 'transferRichPoor': {
+        const remaining = playersRemaining(next);
+        if (remaining.length < 2) break;
+        const richest = [...remaining].sort((a, b) => b.cash - a.cash || a.id - b.id)[0];
+        const poorest = [...remaining].sort((a, b) => a.cash - b.cash || a.id - b.id)[0];
+        if (richest.id === poorest.id) break;
+        next = withPlayerCash(next, richest.id, -effect.amount);
+        next = withPlayerCash(next, poorest.id, effect.amount);
+        next = log(next, 'money', `${richest.name} donates £${effect.amount} to ${poorest.name} (${card.name}).`);
         break;
       }
       case 'cashCurrent': {
@@ -214,6 +269,7 @@ function iconFor(card: EventCardDef): string {
     case 'shift': return '🎠';
     case 'windfall': return '💷';
     case 'levy': return '🧾';
+    case 'economy': return '🏗️';
     case 'disaster': return '⚠️';
   }
 }
@@ -306,7 +362,10 @@ function enforceSolvency(content: ContentPack, state: GameState): GameState {
     if (next.phase === 'game-over') return next;
     return advanceToNextPlayer(content, next);
   }
-  let next: GameState = { ...state, phase: 'settle-debt', debt: shortfall };
+  // A levy that strikes before the Income Phase must not cost the player
+  // their takings: remember where to resume once they are solvent.
+  const settleReturn = state.phase === 'income' ? 'income' : 'action';
+  let next: GameState = { ...state, phase: 'settle-debt', debt: shortfall, settleReturn };
   return log(next, 'money', `${player.name} is £${shortfall} short and must sell or mortgage to stay in the game.`);
 }
 
@@ -324,6 +383,12 @@ function advanceToNextPlayer(content: ContentPack, state: GameState): GameState 
     next = expireEffects(next);
     next = { ...next, round: next.round + 1 };
     next = log(next, 'phase', `— Round ${next.round} —`);
+    const season = seasonForRound(content, next.round);
+    next = log(next, 'season', `${season.icon} ${season.name}. ${season.blurb}`);
+    const rentNow = rentMultiplier(content, next.round);
+    if (rentNow > rentMultiplier(content, next.round - 1)) {
+      next = log(next, 'money', `📈 Rents rise along the front — upkeep is now ×${rentNow.toFixed(2)}.`);
+    }
     next = { ...next, currentPlayer: nextId, phase: 'income' as Phase };
     next = drawEvent(content, next);
   } else {
@@ -366,13 +431,13 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
       const slot = findSlot(state, action.zone, action.slotIndex);
       assertEngine(slot, 'No such slot');
       assertEngine(!slot.structure, 'That slot is already occupied');
-      const cost = buildCost(content, state, player.id, def.id);
+      const cost = buildCost(content, state, player.id, def.id, { zone: action.zone, index: action.slotIndex });
       assertEngine(player.cash >= cost, `Not enough cash (£${cost} needed)`);
       let next = withPlayerCash(state, player.id, -cost);
       next = {
         ...next,
         slots: next.slots.map((s) =>
-          s === slot ? { ...s, structure: { pieces: [def.id], ownerId: player.id, mortgaged: false } } : s,
+          s === slot ? { ...s, structure: { pieces: [def.id], ownerId: player.id, mortgaged: false, invested: cost } } : s,
         ),
       };
       return log(next, 'build', `${player.name} opens ${def.name} — ${zone.name} — for £${cost}.`);
@@ -389,15 +454,23 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
       assertEngine(!structure.mortgaged, 'Cannot stack on a mortgaged structure');
       const groundDef = defById(content, structure.pieces[0]);
       assertEngine(groundDef.kind === 'building', 'Only buildings can be stacked upon');
-      assertEngine(structure.pieces.length < groundDef.maxLevels, `${groundDef.name} is at its maximum height`);
+      const ceiling = maxLevelsAt(content, slot.zone, slot.index, groundDef);
+      assertEngine(
+        structure.pieces.length < ceiling,
+        ceiling < groundDef.maxLevels
+          ? 'The ground here cannot bear another storey'
+          : `${groundDef.name} is at its maximum height`,
+      );
       assertEngine(def.zones.includes(slot.zone), `${def.name} cannot operate in that zone`);
-      const cost = buildCost(content, state, player.id, def.id);
+      const cost = buildCost(content, state, player.id, def.id, { zone: slot.zone, index: slot.index });
       assertEngine(player.cash >= cost, `Not enough cash (£${cost} needed)`);
       let next = withPlayerCash(state, player.id, -cost);
       next = {
         ...next,
         slots: next.slots.map((s) =>
-          s === slot ? { ...s, structure: { ...structure, pieces: [...structure.pieces, def.id] } } : s,
+          s === slot
+            ? { ...s, structure: { ...structure, pieces: [...structure.pieces, def.id], invested: (structure.invested ?? 0) + cost } }
+            : s,
         ),
       };
       return log(next, 'build', `${player.name} stacks a ${def.name} — now ${structure.pieces.length + 1} levels tall.`);
@@ -410,7 +483,7 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
       const structure = slot.structure;
       assertEngine(structure.ownerId === player.id, 'You can only sell your own structures');
       assertEngine(!structure.mortgaged, 'Lift the mortgage before selling');
-      const proceeds = Math.floor(structureBaseValue(content, structure) * content.rules.sellPct);
+      const proceeds = Math.floor(structureBaseValue(content, structure) * sellPctFor(content, player));
       let next = withPlayerCash(state, player.id, proceeds);
       next = { ...next, slots: next.slots.map((s) => (s === slot ? { ...s, structure: null } : s)) };
       next = log(next, 'money', `${player.name} sells ${defById(content, structure.pieces[0]).name} back to the bank for £${proceeds}.`);
@@ -430,7 +503,7 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
         ...next,
         slots: next.slots.map((s) => (s === slot ? { ...s, structure: { ...structure, mortgaged: true } } : s)),
       };
-      next = log(next, 'money', `${player.name} mortgages ${defById(content, structure.pieces[0]).name} for £${value}. Its flag comes down.`);
+      next = log(next, 'money', `${player.name} mortgages ${defById(content, structure.pieces[0]).name} for £${value}. Its flag turns grey.`);
       return settleProgress(content, next);
     }
 
@@ -501,9 +574,12 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
       }
 
       let next: GameState = { ...state, rng };
-      let tourists = (d1.value + d2.value) * content.rules.touristsPerPip;
-      if (surge) tourists += 20;
-      // Event effects can add or remove visitors.
+      const { touristBase, touristsPerPip, surgeBonus } = content.rules;
+      const season = seasonForRound(content, next.round);
+      let tourists = touristBase + (d1.value + d2.value) * touristsPerPip;
+      if (surge) tourists += surgeBonus;
+      // The season wheel scales the natural tide; events then add or remove visitors.
+      tourists = Math.round(tourists * season.touristMult);
       for (const eff of next.activeEffects) {
         if (eff.effect.type === 'touristDelta') tourists += eff.effect.amount;
       }
@@ -518,12 +594,14 @@ export function applyAction(content: ContentPack, state: GameState, action: Game
         volume: [d1.value, d2.value] as [number, number],
         preference,
         tourists,
+        seasonId: season.id,
+        seasonMult: season.touristMult,
         triggeredDisaster,
         surge,
       };
       next = { ...next, tourists: byZone, totalTourists: tourists, preferredZone: preference, lastDice: dice };
       const prefName = preference === 'spread' ? 'spread evenly' : `drawn to ${content.zones.find((z) => z.id === preference)!.name}`;
-      next = log(next, 'dice', `🎲 ${currentName(next)} rolls ${d1.value}+${d2.value}${surge ? ' — a surge!' : ''}: ${tourists} tourists arrive, ${prefName}.`);
+      next = log(next, 'dice', `🎲 ${currentName(next)} rolls ${d1.value}+${d2.value}${surge ? ' — a surge!' : ''}: ${tourists} tourists arrive (${season.icon} ${season.name}), ${prefName}.`);
       return advanceToNextPlayer(content, next);
     }
 
@@ -562,7 +640,7 @@ function settleProgress(content: ContentPack, state: GameState): GameState {
   if (state.phase !== 'settle-debt') return state;
   const player = state.players[state.currentPlayer];
   if (player.cash >= 0) {
-    let next: GameState = { ...state, phase: 'action', debt: 0 };
+    let next: GameState = { ...state, phase: state.settleReturn, debt: 0, settleReturn: 'action' };
     return log(next, 'money', `${player.name} is solvent again.`);
   }
   if (liquidationValue(content, state, player.id) < 0) {
@@ -583,6 +661,6 @@ export function serialize(state: GameState): string {
 
 export function deserialize(json: string): GameState {
   const state = JSON.parse(json) as GameState;
-  if (state.schemaVersion !== 1) throw new EngineError('Unsupported save version');
+  if (state.schemaVersion !== 2) throw new EngineError('Unsupported save version');
   return state;
 }

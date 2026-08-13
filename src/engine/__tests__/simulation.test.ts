@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { applyAction } from '../engine';
-import { buildCost, defById, findSlot, liquidationValue, playersRemaining, structureBaseValue } from '../selectors';
+import { buildCost, defById, findSlot, liquidationValue, maxLevelsAt, playersRemaining, structureBaseValue } from '../selectors';
 import { nextFloat, seedRng, type RngState } from '../rng';
 import { content, makePlayers, newGame } from './helpers';
 import type { GameAction, GameState } from '../types';
@@ -27,7 +27,7 @@ function invariants(state: GameState) {
     if (!s) continue;
     expect(state.players[s.ownerId].eliminated).toBe(false);
     const ground = defById(content, s.pieces[0]);
-    expect(s.pieces.length).toBeLessThanOrEqual(ground.maxLevels);
+    expect(s.pieces.length).toBeLessThanOrEqual(maxLevelsAt(content, slot.zone, slot.index, ground));
     expect(ground.zones).toContain(slot.zone);
   }
   // Tourist counts are non-negative and reconcile with the total.
@@ -79,12 +79,12 @@ function chooseAction(rng: { s: RngState }, state: GameState): GameAction {
       if (chance(rng, 0.75)) {
         const options: GameAction[] = [];
         for (const def of content.establishments) {
-          const cost = buildCost(content, state, me.id, def.id);
-          if (cost > me.cash) continue;
           for (const slot of state.slots) {
             if (slot.structure) continue;
             const zone = content.zones.find((z) => z.id === slot.zone)!;
             if (!zone.allows.includes(def.kind) || !def.zones.includes(slot.zone)) continue;
+            const cost = buildCost(content, state, me.id, def.id, { zone: slot.zone, index: slot.index });
+            if (cost > me.cash) continue;
             options.push({ type: 'BUILD', defId: def.id, zone: slot.zone, slotIndex: slot.index });
           }
         }
@@ -93,8 +93,8 @@ function chooseAction(rng: { s: RngState }, state: GameState): GameAction {
           const s = slot.structure;
           if (!s || s.ownerId !== me.id || s.mortgaged) continue;
           const ground = defById(content, s.pieces[0]);
-          if (ground.kind !== 'building' || s.pieces.length >= ground.maxLevels) continue;
-          const cost = buildCost(content, state, me.id, ground.id);
+          if (ground.kind !== 'building' || s.pieces.length >= maxLevelsAt(content, slot.zone, slot.index, ground)) continue;
+          const cost = buildCost(content, state, me.id, ground.id, { zone: slot.zone, index: slot.index });
           if (cost <= me.cash) {
             options.push({ type: 'STACK', defId: ground.id, zone: slot.zone, slotIndex: slot.index });
           }
